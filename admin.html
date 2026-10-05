@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<meta name="robots" content="noindex, nofollow">
+<title>No Face Night · Door</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@700;900&family=Montserrat:wght@400;500;600;700&display=swap">
+<link rel="stylesheet" href="site.css">
+</head>
+<body>
+<div class="wrap">
+  <div class="bar">
+    <span class="mark">NO <b>FACE</b> NIGHT · DOOR</span>
+    <button class="btn alt sm" id="signout" type="button" hidden>Sign out</button>
+  </div>
+
+  <main>
+    <!-- signed out -->
+    <section class="panel" id="gate" style="max-width:520px">
+      <h2>Staff login</h2>
+      <p class="note" id="gate-msg" style="margin-bottom:14px">Sign in with an authorized Google account to scan tickets and see reservations.</p>
+      <button class="btn" id="signin" type="button">Sign in with Google</button>
+    </section>
+
+    <!-- signed in -->
+    <div id="app" hidden>
+      <div class="stats" aria-live="polite">
+        <div class="stat"><small>Reserved</small><b id="s-res">0</b></div>
+        <div class="stat"><small>Paid &amp; in</small><b id="s-in">0</b></div>
+        <div class="stat"><small>Cash due</small><b id="s-due">$0</b></div>
+        <div class="stat"><small>Left</small><b id="s-left">250</b></div>
+      </div>
+
+      <section class="panel" id="sales">
+        <h2>Reservations</h2>
+        <p class="note" id="sales-msg" style="margin-bottom:12px"></p>
+        <button class="btn alt sm" id="sales-btn" type="button">Open reservations</button>
+      </section>
+
+      <section class="panel">
+        <h2>Scan a ticket</h2>
+        <div class="row2" style="margin-bottom:12px">
+          <button class="btn sm" id="cam-btn" type="button">Start camera</button>
+          <div class="field">
+            <label for="manual">Or type the code / name / phone</label>
+            <input id="manual" type="search" autocomplete="off" placeholder="Code, name or phone">
+          </div>
+        </div>
+        <video class="cam" id="cam" playsinline muted hidden></video>
+        <canvas id="canvas" hidden></canvas>
+        <div id="result" hidden></div>
+      </section>
+
+      <section class="panel">
+        <h2>All reservations</h2>
+        <div class="row2" style="margin-bottom:14px">
+          <div class="field"><label for="q">Search</label><input id="q" type="search" autocomplete="off" placeholder="Name, phone, email or code"></div>
+          <div class="field"><label for="flt">Show</label>
+            <select id="flt"><option value="all">All</option><option value="reserved">Waiting to pay</option><option value="paid">Paid &amp; in</option><option value="cancelled">Cancelled</option></select>
+          </div>
+        </div>
+        <div class="list" id="list"></div>
+      </section>
+    </div>
+  </main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jsQR/1.4.0/jsQR.min.js"></script>
+<script type="module">
+import { db, auth, CAPACITY, PRICE, ADMIN_EMAILS } from "./firebase-init.js";
+import { GoogleAuthProvider, signInWithPopup, signOut, onAuthStateChanged }
+  from "https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js";
+import { doc, collection, query, orderBy, onSnapshot, getDoc, setDoc, updateDoc, runTransaction, serverTimestamp }
+  from "https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js";
+
+var $ = function (id) { return document.getElementById(id); };
+var counterRef = doc(db, "meta", "counter");
+var rows = [], counter = null, unsubs = [], stream = null, scanning = false, lastScan = "", selected = null;
+
+function esc(s) { return String(s).replace(/[&<>"']/g, function (c) { return { "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" }[c]; }); }
+function money(n) { return "$" + n; }
+function when(ts) { try { return ts && ts.toDate ? ts.toDate().toLocaleString([], { month: "short", day: "numeric", hour: "numeric", minute: "2-digit" }) : ""; } catch (e) { return ""; } }
+
+/* ---------- auth ---------- */
+$("signin").addEventListener("click", function () {
+  signInWithPopup(auth, new GoogleAuthProvider()).catch(function () {
+    $("gate-msg").textContent = "Sign-in was cancelled or blocked. Allow pop-ups for this page and try again.";
+  });
+});
+$("signout").addEventListener("click", function () { stopCam(); signOut(auth); });
+
+onAuthStateChanged(auth, function (user) {
+  unsubs.forEach(function (u) { u(); }); unsubs = [];
+  var ok = user && user.email && ADMIN_EMAILS.indexOf(user.email.toLowerCase()) !== -1;
+  $("app").hidden = !ok; $("gate").hidden = !!ok; $("signout").hidden = !user;
+  if (user && !ok) $("gate-msg").textContent = user.email + " is not an authorized staff account. Sign out and use a different Google account.";
+  if (!ok) return;
+  unsubs.push(onSnapshot(counterRef, function (s) { counter = s.exists() ? s.data() : null; renderStats(); renderSales(); }));
+  unsubs.push(onSnapshot(query(collection(db, "reservations"), orderBy("createdAt", "desc")), function (s) {
+    rows = s.docs.map(function (d) { return Object.assign({ id: d.id }, d.data()); });
+    renderStats(); renderList(); if (selected) refreshSelected();
+  }, function () { $("list").innerHTML = '<p class="err">Could not load reservations. Check that the Firestore rules are published.</p>'; }));
+});
+
+/* ---------- stats and sales switch ---------- */
+function renderStats() {
+  var live = rows.filter(function (r) { return r.status !== "cancelled"; });
+  var reserved = live.reduce(function (a, r) { return a + r.qty; }, 0);
+  var inside = live.filter(function (r) { return r.checkedIn; }).reduce(function (a, r) { return a + r.qty; }, 0);
+  var due = live.filter(function (r) { return !r.checkedIn; }).reduce(function (a, r) { return a + r.qty * PRICE; }, 0);
+  $("s-res").textContent = reserved; $("s-in").textContent = inside; $("s-due").textContent = money(due);
+  $("s-left").textContent = counter ? Math.max(0, CAPACITY - counter.total) : CAPACITY;
+}
+function renderSales() {
+  var m = $("sales-msg"), b = $("sales-btn");
+  if (!counter) { m.textContent = "Reservations have not been opened yet. The public page shows \"Reservations open soon\" until you open them."; b.textContent = "Open reservations"; return; }
+  m.innerHTML = counter.open ? '<span class="ok">Open.</span> ' + counter.total + " of " + CAPACITY + " tickets reserved." : "Closed. Nobody can reserve right now.";
+  b.textContent = counter.open ? "Close reservations" : "Reopen reservations";
+}
+$("sales-btn").addEventListener("click", async function () {
+  var b = $("sales-btn"); b.disabled = true;
+  try {
+    if (!counter) await setDoc(counterRef, { total: 0, lastId: "", open: true });
+    else await updateDoc(counterRef, { open: !counter.open });
+  } catch (e) { $("sales-msg").textContent = "Could not change this. Check that the Firestore rules are published."; }
+  b.disabled = false;
+});
+
+/* ---------- actions ---------- */
+async function admit(id) {
+  await updateDoc(doc(db, "reservations", id), { status: "paid", checkedIn: true, checkedInAt: serverTimestamp() });
+}
+async function cancelRes(id) {
+  await runTransaction(db, async function (tx) {
+    var rr = doc(db, "reservations", id), rs = await tx.get(rr), cs = await tx.get(counterRef);
+    if (!rs.exists() || rs.data().status === "cancelled" || rs.data().checkedIn) return;
+    tx.update(rr, { status: "cancelled" });
+    if (cs.exists()) tx.update(counterRef, { total: Math.max(0, cs.data().total - rs.data().qty), lastId: cs.data().lastId, open: cs.data().open });
+  });
+}
+async function act(kind, id, btn) {
+  if (kind === "cancel" && !btn.dataset.sure) { btn.dataset.sure = "1"; btn.textContent = "Tap again to cancel"; setTimeout(function () { if (btn.isConnected) { delete btn.dataset.sure; btn.textContent = "Cancel"; } }, 3000); return; }
+  btn.disabled = true;
+  try { if (kind === "admit") await admit(id); else await cancelRes(id); }
+  catch (e) { alert_("Could not save. Check your connection and try again."); }
+  btn.disabled = false;
+}
+function alert_(msg) { var r = $("result"); r.hidden = false; r.className = "result bad"; r.innerHTML = '<p class="err">' + esc(msg) + "</p>"; }
+
+/* ---------- rendering ---------- */
+function chip(r) {
+  if (r.status === "cancelled") return '<span class="chip cancelled">Cancelled</span>';
+  if (r.checkedIn) return '<span class="chip paid">Paid &amp; in</span>';
+  return '<span class="chip reserved">Waiting to pay</span>';
+}
+function buttons(r) {
+  if (r.status === "cancelled" || r.checkedIn) return "";
+  return '<button class="btn go sm" data-act="admit" data-id="' + r.id + '" type="button">Collected ' + money(r.qty * PRICE) + " · Admit</button>" +
+         '<button class="btn alt sm" data-act="cancel" data-id="' + r.id + '" type="button">Cancel</button>';
+}
+function renderList() {
+  var q = $("q").value.trim().toLowerCase(), f = $("flt").value;
+  var shown = rows.filter(function (r) {
+    var st = r.status === "cancelled" ? "cancelled" : r.checkedIn ? "paid" : "reserved";
+    if (f !== "all" && st !== f) return false;
+    if (!q) return true;
+    return (r.name + " " + r.phone + " " + r.email + " " + r.id.slice(0, 6)).toLowerCase().indexOf(q) !== -1;
+  });
+  $("list").innerHTML = shown.length ? shown.map(function (r) {
+    return '<div class="item"><div class="top"><b>' + esc(r.name) + "</b>" + chip(r) + "</div>" +
+      '<div class="sub">' + r.qty + (r.qty === 1 ? " ticket" : " tickets") + " · " + esc(r.phone) + " · " + esc(r.email) + "<br>Code " + esc(r.id.slice(0, 6).toUpperCase()) + " · " + esc(when(r.createdAt)) + "</div>" +
+      '<div class="acts2">' + buttons(r) + "</div></div>";
+  }).join("") : '<p class="note">No reservations match.</p>';
+}
+$("q").addEventListener("input", renderList);
+$("flt").addEventListener("change", renderList);
+document.addEventListener("click", function (e) {
+  var b = e.target.closest("[data-act]"); if (b) act(b.dataset.act, b.dataset.id, b);
+});
+
+function showResult(r, note) {
+  selected = r ? r.id : null;
+  var el = $("result"); el.hidden = false;
+  if (!r) { el.className = "result bad"; el.innerHTML = '<p class="err">No reservation found' + (note ? " for “" + esc(note) + "”" : "") + ".</p>"; return; }
+  var cls = r.status === "cancelled" ? "bad" : r.checkedIn ? "bad" : "good";
+  var msg = r.status === "cancelled" ? '<p class="err">This reservation was cancelled. Do not admit.</p>'
+    : r.checkedIn ? '<p class="err">Already used' + (r.checkedInAt ? " at " + esc(when(r.checkedInAt)) : "") + ". Do not admit again.</p>"
+    : '<p class="tk-name">Collect ' + money(r.qty * PRICE) + "</p>";
+  el.className = "result " + cls;
+  el.innerHTML = '<div class="top" style="display:flex;justify-content:space-between;gap:8px;flex-wrap:wrap"><b style="font-size:22px">' + esc(r.name) + "</b>" + chip(r) + "</div>" +
+    '<div class="sub">' + r.qty + (r.qty === 1 ? " ticket" : " tickets") + " · " + esc(r.phone) + " · Code " + esc(r.id.slice(0, 6).toUpperCase()) + "</div>" + msg +
+    '<div class="acts2">' + buttons(r) + "</div>";
+}
+function refreshSelected() { var r = rows.filter(function (x) { return x.id === selected; })[0]; if (r) showResult(r); }
+
+async function lookup(text) {
+  var t = text.trim(); if (!t) return;
+  var found = rows.filter(function (r) { return r.id === t; })[0];
+  if (!found && /^[A-Za-z0-9]{10,40}$/.test(t)) {
+    try { var s = await getDoc(doc(db, "reservations", t)); if (s.exists()) found = Object.assign({ id: s.id }, s.data()); } catch (e) {}
+  }
+  if (!found) {
+    var low = t.toLowerCase();
+    var m = rows.filter(function (r) { return r.id.slice(0, 6).toLowerCase() === low || r.phone.replace(/\D/g, "") === t.replace(/\D/g, "") && t.replace(/\D/g, "").length >= 7 || r.name.toLowerCase().indexOf(low) !== -1; });
+    if (m.length === 1) found = m[0];
+    else if (m.length > 1) { $("q").value = t; renderList(); $("result").hidden = false; $("result").className = "result"; $("result").innerHTML = '<p class="note">' + m.length + " matches. Pick one in the list below.</p>"; return; }
+  }
+  showResult(found || null, t);
+}
+$("manual").addEventListener("keydown", function (e) { if (e.key === "Enter") { lookup($("manual").value); } });
+
+/* ---------- camera scanner ---------- */
+function stopCam() {
+  scanning = false;
+  if (stream) { stream.getTracks().forEach(function (t) { t.stop(); }); stream = null; }
+  $("cam").hidden = true; $("cam-btn").textContent = "Start camera";
+}
+$("cam-btn").addEventListener("click", async function () {
+  if (scanning) return stopCam();
+  try {
+    stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" }, audio: false });
+  } catch (e) { return alert_("Camera blocked. Allow camera access for this page, or type the code instead."); }
+  var v = $("cam"); v.srcObject = stream; v.hidden = false; await v.play();
+  scanning = true; $("cam-btn").textContent = "Stop camera";
+  var c = $("canvas"), ctx = c.getContext("2d", { willReadFrequently: true });
+  (function tick() {
+    if (!scanning) return;
+    if (v.readyState === v.HAVE_ENOUGH_DATA) {
+      c.width = v.videoWidth; c.height = v.videoHeight; ctx.drawImage(v, 0, 0, c.width, c.height);
+      var img = ctx.getImageData(0, 0, c.width, c.height);
+      var code = window.jsQR && jsQR(img.data, img.width, img.height, { inversionAttempts: "dontInvert" });
+      if (code && code.data && code.data !== lastScan) { lastScan = code.data; lookup(code.data); if (navigator.vibrate) navigator.vibrate(60); setTimeout(function () { lastScan = ""; }, 2500); }
+    }
+    requestAnimationFrame(tick);
+  })();
+});
+</script>
+</body>
+</html>

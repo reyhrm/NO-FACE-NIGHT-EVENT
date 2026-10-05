@@ -1,0 +1,65 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    function isAdmin() {
+      return request.auth != null
+        && request.auth.token.email_verified == true
+        && request.auth.token.email in [
+          'reinaldohermelo2002@gmail.com',
+          'willyekua.adjaba@gmail.com'
+        ];
+    }
+
+    function counterPath() {
+      return /databases/$(database)/documents/meta/counter;
+    }
+
+    function resPath(id) {
+      return /databases/$(database)/documents/reservations/$(id);
+    }
+
+    // Public counter: total tickets reserved, id of the newest reservation, and whether sales are open.
+    match /meta/counter {
+      allow get: if true;
+      allow create, delete: if isAdmin();
+      allow update: if isAdmin() || (
+        request.resource.data.keys().hasOnly(['total', 'lastId', 'open'])
+        && resource.data.open == true
+        && request.resource.data.open == true
+        && request.resource.data.total <= 250
+        && request.resource.data.lastId is string
+        && !exists(resPath(request.resource.data.lastId))
+        && existsAfter(resPath(request.resource.data.lastId))
+        && getAfter(resPath(request.resource.data.lastId)).data.qty
+             == request.resource.data.total - resource.data.total
+      );
+    }
+
+    // One document per reservation. The auto-generated id is the QR code content.
+    match /reservations/{id} {
+      allow get: if true;            // only someone holding the unguessable id can read one
+      allow list: if isAdmin();      // nobody else can list or search reservations
+      allow create: if get(counterPath()).data.open == true
+        && getAfter(counterPath()).data.lastId == id
+        && request.resource.data.keys().hasOnly(
+             ['name', 'phone', 'email', 'qty', 'status', 'checkedIn', 'createdAt'])
+        && request.resource.data.name is string
+        && request.resource.data.name.size() >= 2
+        && request.resource.data.name.size() <= 80
+        && request.resource.data.phone is string
+        && request.resource.data.phone.size() >= 7
+        && request.resource.data.phone.size() <= 25
+        && request.resource.data.email is string
+        && request.resource.data.email.size() <= 120
+        && request.resource.data.email.matches('.+@.+[.].+')
+        && request.resource.data.qty is int
+        && request.resource.data.qty >= 1
+        && request.resource.data.qty <= 3
+        && request.resource.data.status == 'reserved'
+        && request.resource.data.checkedIn == false
+        && request.resource.data.createdAt == request.time;
+      allow update, delete: if isAdmin();
+    }
+  }
+}

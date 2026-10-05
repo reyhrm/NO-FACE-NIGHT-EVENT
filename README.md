@@ -1,10 +1,13 @@
 # No Face Night
 
-Ticket page for No Face Night (Sunday, Nov 1, Houston). Static site, bilingual ES/EN.
+Reservation site for No Face Night (Sunday, Nov 1, Houston). Static site on GitHub Pages with Firebase (Firestore + Google sign-in).
 
-## Before going live
-1. Create a $25 Payment Link in Stripe and paste it into `STRIPE_LINK` near the bottom of `index.html`.
-2. Watch sales live in the Stripe Dashboard (Payments).
+- `index.html`: public page. Guests reserve up to 3 tickets and get a QR ticket. They pay $25 per person at the door.
+- `admin.html`: staff page (Google login, two authorized emails). Scan QR tickets, collect payment, admit, cancel, see live counts.
+- `firestore.rules`: security rules. Publish them in Firebase console > Firestore > Rules. Capacity (250), per-person limit (3) and the admin emails are enforced here.
+- Capacity and limits also appear in `firebase-init.js`; keep both in sync.
 
-## Hosting
-GitHub Pages: Settings > Pages > Deploy from branch `main` / root.
+## One-time setup
+1. Firebase console > Authentication > Settings > Authorized domains: add `reyhrm.github.io`.
+2. Firestore > Rules: paste `firestore.rules` and Publish.
+3. Open `admin.html`, sign in, and click "Open reservations".
